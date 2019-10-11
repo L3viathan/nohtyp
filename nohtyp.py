@@ -1,7 +1,11 @@
 import dis
 import glob
 import marshal
+import logging
 from dataclasses import dataclass
+
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger(__name__)
 
 opmap = {code: name for name, code in dis.opmap.items()}
 
@@ -28,15 +32,15 @@ class Python:
         self._return = None
 
     def __call__(self, *args):
-        # print("Trying to run... (with args:", args, ")")
+        log.debug("Trying to run... (with args: %r)", args)
         for name, arg in zip(self.varnames, args):
             self._mappings[name] = arg
         self._return = None
         for opcode, arg in pairwise(self.code):
             op = opmap[opcode]
-            # print("opcode:", op, "arg:", arg)
+            log.debug("opcode: %s, arg: %r", op, arg)
             getattr(self, op)(arg)
-            # print("new stack:", self._stack)
+            log.debug("new stack: %r", self._stack)
         return self._return
 
     def LOAD_CONST(self, arg):
@@ -86,13 +90,13 @@ class Function:
 
 
 def run(filename):
-    # print("trying to run", filename)
+    log.debug("trying to run %s", filename)
     cached = glob.glob(f"__pycache__/{filename}.cpython-*.pyc")
     if not cached:
-        print("Couldn't find cached file")
+        log.debug("Couldn't find cached file")
         return
     cached = cached[0]
-    # print("Found cached file", cached)
+    log.debug("Found cached file %s", cached)
     with open(cached, "rb") as f:
         f.seek(16)  # ignore magic + timestamp
         code = marshal.load(f)
