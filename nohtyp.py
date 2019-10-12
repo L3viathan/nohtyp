@@ -3,6 +3,7 @@ import glob
 import marshal
 import logging
 import builtins
+import py_compile
 from dataclasses import dataclass
 
 logging.basicConfig(level=logging.DEBUG)
@@ -41,7 +42,6 @@ class Python:
         log.debug("Trying to run... (with args: %r)", args)
         for name, arg in zip(self.varnames, args):
             setattr(self._mappings, name, arg)
-        # FIXME: instead of dictionary, return attributed object
         self._return = self._mappings
         while True:
             code = self.code[self.ip:self.ip+2]
@@ -106,7 +106,6 @@ class Python:
         name = self.names[arg]
         try:
             self._stack.append(run(name))
-            # setattr(self._mappings, name, run(name))
         except FileNotFoundError:
             # FIXME: Either not compiled yet, or builtin. For now, just import the actual Python names
             # setattr(self._mappings, name, __import__(name))
@@ -222,10 +221,14 @@ class Python:
 Function = type(pairwise)
 
 
-def run(filename):
+def run(filename, try_compile=True):
     log.debug("trying to run %s", filename)
     cached = glob.glob(f"__pycache__/{filename}.cpython-*.pyc")
     if not cached:
+        if try_compile:
+            log.debug("Attempting to compile file")
+            py_compile.compile(f"{filename}.py")
+            return run(filename, try_compile=False)
         raise FileNotFoundError("Couldn't find cached file")
     cached = cached[0]
     log.debug("Found cached file %s", cached)
@@ -237,4 +240,4 @@ def run(filename):
 
 
 if __name__ == "__main__":
-    run("nohtyp")
+    run("bla")
