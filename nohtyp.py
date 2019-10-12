@@ -19,14 +19,16 @@ def pairwise(iterable):
 
 
 class Module:
-    def __init__(self, name):
+    def __init__(self, name, mappings=None):
         self.__name__ = name
         for k, v in builtins.__dict__.items():
             setattr(self, k, v)
+        if mappings:
+            self.__dict__.update(**mappings)
 
 
 class Python:
-    def __init__(self, code, my_name="unknown"):
+    def __init__(self, code, my_name="unknown", mappings=None):
         for k in dir(code):
             if k.startswith("co_"):
                 _, __, name = k.partition("_")
@@ -34,7 +36,7 @@ class Python:
                 setattr(self, name, value)
         self._stack = []
         self.varnames = list(self.varnames)
-        self._mappings = Module(my_name)
+        self._mappings = Module(my_name, mappings=mappings)
         self._return = None
         self.ip = 0
 
@@ -87,7 +89,7 @@ class Python:
         if isinstance(function, (type(print), type)):
             self._stack.append(function(*args))
         else:
-            self._stack.append(Python(function.__code__, function.__name__)(*args))
+            self._stack.append(Python(function.__code__, function.__name__, mappings=function.__globals__)(*args))
 
     def LOAD_FAST(self, arg):
         self._stack.append(getattr(self._mappings, self.varnames[arg]))
@@ -217,6 +219,26 @@ class Python:
         if self._stack.pop():
             self.ip = arg
 
+    def LOAD_GLOBAL(self, arg):
+        self._stack.append(getattr(self._mappings, self.names[arg]))
+
+    def FORMAT_VALUE(self, arg):
+        if (arg & 0x04) == 0x04:
+            fmt_spec = self._stack.pop()
+        else:
+            fmt_spec = ""
+        value = self._stack.pop()
+        if (arg & 0x03) == 0x01:
+            value = str(value)
+        elif (arg & 0x03) == 0x02:
+            value = repr(value)
+        elif (arg & 0x03) == 0x03:
+            value = ascii(value)
+        self._stack.append(value.__format__(fmt_spec))
+
+    def BUILD_STRING(self, arg):
+        self._stack.append("".join(self._stack.pop() for _ in range(arg)))
+
 
 Function = type(pairwise)
 
@@ -239,5 +261,5 @@ def run(filename, try_compile=True):
         return interpreter()
 
 
-if __name__ == "__main__":
-    run("bla")
+if __name__ == '__main__':
+    run("nohtyp")
