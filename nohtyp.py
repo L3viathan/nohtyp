@@ -2,6 +2,7 @@ import dis
 import glob
 import marshal
 import logging
+import builtins
 from dataclasses import dataclass
 
 logging.basicConfig(level=logging.DEBUG)
@@ -19,24 +20,22 @@ def pairwise(iterable):
 class Module:
     def __init__(self, name):
         self.__name__ = name
-        self.print = print
+        for k, v in builtins.__dict__.items():
+            setattr(self, k, v)
 
 
 class Python:
-    def __init__(self, code, methodname="unknown"):
+    def __init__(self, code, my_name="unknown"):
         for k in dir(code):
             if k.startswith("co_"):
                 _, __, name = k.partition("_")
                 value = getattr(code, k)
                 setattr(self, name, value)
         self._stack = []
-        self.consts = [
-            Python(item) if isinstance(item, type(code)) else item
-            for item in self.consts
-        ]
         self.varnames = list(self.varnames)
-        self._mappings = Module(methodname)
+        self._mappings = Module(my_name)
         self._return = None
+        self.ip = 0
 
     def __call__(self, *args):
         log.debug("Trying to run... (with args: %r)", args)
@@ -44,7 +43,12 @@ class Python:
             setattr(self._mappings, name, arg)
         # FIXME: instead of dictionary, return attributed object
         self._return = self._mappings
-        for opcode, arg in pairwise(self.code):
+        while True:
+            code = self.code[self.ip:self.ip+2]
+            if not code:
+                break
+            opcode, arg = code
+            self.ip += 2
             op = opmap[opcode]
             log.debug("opcode: %s, arg: %r", op, arg)
             getattr(self, op)(arg)
@@ -57,7 +61,16 @@ class Python:
     def MAKE_FUNCTION(self, arg):
         name = self._stack.pop()
         code = self._stack.pop()
-        self._stack.append(Function(name, code))
+        func = Function(code, self._mappings.__dict__, name=name)
+        if arg & 0x08:
+            func.__closure__ = self._stack.pop()
+        if arg & 0x04:
+            func.__annotations__ = self._stack.pop()
+        if arg & 0x02:
+            func.kwdefaults__ = self._stack.pop()
+        if arg & 0x01:
+            func.__defaults__ = self._stack.pop()
+        self._stack.append(func)
 
     def STORE_NAME(self, arg):
         value = self._stack.pop()
@@ -69,12 +82,14 @@ class Python:
         self._stack.append(getattr(self._mappings, name))
 
     def CALL_FUNCTION(self, arg):
-        args = [self._stack.pop() for _ in range(arg)]
+        args = reversed([self._stack.pop() for _ in range(arg)])
         function = self._stack.pop()
-        self._stack.append(function(*args))
+        if isinstance(function, (type(print), type)):
+            self._stack.append(function(*args))
+        else:
+            self._stack.append(Python(function.__code__, function.__name__)(*args))
 
     def LOAD_FAST(self, arg):
-        # FIXME: load from bindings?
         self._stack.append(getattr(self._mappings, self.varnames[arg]))
 
     def BINARY_ADD(self, arg):
@@ -98,11 +113,9 @@ class Python:
             self._stack.append(__import__(name))
 
     def IMPORT_FROM(self, arg):
-        # name = self.names[arg]
+        name = self.names[arg]
         module = self._stack.pop()
-        names = self._stack.pop()
-        for name in names:
-            setattr(self._mappings, name, getattr(module, name))
+        setattr(self._mappings, name, getattr(module, name))
 
     def LOAD_ATTR(self, arg):
         attr = self.names[arg]
@@ -142,10 +155,12 @@ class Python:
 
     def FOR_ITER(self, arg):
         iterator = self._stack.pop()
-        value = iterator.__next__()
-        # FIXME: handle loop termination (advance bytecode by arg)
-        self._stack.append(iterator)
-        self._stack.append(value)
+        try:
+            value = iterator.__next__()
+            self._stack.append(iterator)
+            self._stack.append(value)
+        except StopIteration:
+            self.ip += arg
 
     def UNPACK_SEQUENCE(self, arg):
         sequence = self._stack.pop()
@@ -161,16 +176,50 @@ class Python:
         self._stack[-arg][key] = value
 
     def JUMP_ABSOLUTE(self, arg):
-        ...
+        self.ip = arg
+
+    def LOAD_BUILD_CLASS(self, arg):
+        self._stack.append(builtins.__build_class__)
+
+    def COMPARE_OP(self, arg):
+        op = dis.cmp_op[arg]
+        y, x = self._stack.pop(), self._stack.pop()
+        if op == "==":
+            self._stack.append(x == y)
+        elif op == "<":
+            self._stack.append(x < y)
+        elif op == ">":
+            self._stack.append(x > y)
+        elif op == "<=":
+            self._stack.append(x <= y)
+        elif op == ">=":
+            self._stack.append(x >= y)
+        elif op == "!=":
+            self._stack.append(x != y)
+        elif op == "in":
+            self._stack.append(x in y)
+        elif op == "not in":
+            self._stack.append(x not in y)
+        elif op == "is":
+            self._stack.append(x is y)
+        elif op == "is not":
+            self._stack.append(x is not y)
+        elif op == "exception match":
+            import ipdb; ipdb.set_trace()
+            ...
+        else:
+            raise RuntimeError("This probably shouldn't happen")
+
+    def POP_JUMP_IF_FALSE(self, arg):
+        if not self._stack.pop():
+            self.ip = arg
+
+    def POP_JUMP_IF_TRUE(self, arg):
+        if self._stack.pop():
+            self.ip = arg
 
 
-@dataclass
-class Function:
-    name: str
-    code: Python
-
-    def __call__(self, *args):
-        return self.code(*args)
+Function = type(pairwise)
 
 
 def run(filename):
