@@ -1,4 +1,5 @@
 import dis
+import inspect
 import glob
 import marshal
 import logging
@@ -11,6 +12,17 @@ log = logging.getLogger(__name__)
 
 opmap = {code: name for name, code in dis.opmap.items()}
 mod_cache = {}
+
+
+def make_cell(val=None):
+    # Thanks, user2357112:
+    # https://stackoverflow.com/a/37666086/1016216
+    x = val
+
+    def closure():
+        return x
+
+    return closure.__closure__[0]
 
 
 def pairwise(iterable):
@@ -28,7 +40,9 @@ class Namespace:
 
     def __getattr__(self, attribute):
         if self.__parent:
-            log.warn(f"Can't find {attribute} on {self.__name__}, looking at parent ({self.__parent.__name__})")
+            log.warning(
+                f"Can't find {attribute} on {self.__name__}, looking at parent ({self.__parent.__name__})"
+            )
             return getattr(self.__parent, attribute)
         raise AttributeError(f"Can't find {attribute} on {self.__name__}")
 
@@ -46,7 +60,9 @@ class Python:
         if module:  # meaning self is _not_ a module
             # warning: module can be either real, builtin module, or own module
             self._mappings = Namespace(
-                my_name, parent=module._mappings, mappings=mappings
+                my_name,
+                parent=module._mappings if isinstance(module, Python) else module,
+                mappings=mappings,
             )
         else:
             self._mappings = Namespace(my_name, parent=builtins)
@@ -67,7 +83,10 @@ class Python:
             opcode, arg = code
             self.ip += 2
             op = opmap[opcode]
-            log.debug("opcode: %s, arg: %r", op, arg)
+            if op in ("CALL_FUNCTION", "IMPORT_NAME", "MAKE_FUNCTION"):
+                log.info("opcode: %s, arg: %r", op, arg)
+            else:
+                log.debug("opcode: %s, arg: %r", op, arg)
             getattr(self, op)(arg)
             log.debug("new stack: %r", self._stack)
         return self._return
@@ -78,15 +97,18 @@ class Python:
     def MAKE_FUNCTION(self, arg):
         name = self._stack.pop()
         code = self._stack.pop()
-        func = Function(code, self._mappings.__dict__, name=name)
+        closure = argdefs = None
         if arg & 0x08:
-            func.__closure__ = self._stack.pop()
+            closure = tuple(map(make_cell, self._stack.pop()))
         if arg & 0x04:
             func.__annotations__ = self._stack.pop()
         if arg & 0x02:
-            func.kwdefaults__ = self._stack.pop()
+            func.__kwdefaults__ = self._stack.pop()
         if arg & 0x01:
-            func.__defaults__ = self._stack.pop()
+            argdefs = self._stack.pop()
+        func = Function(
+            code, self._mappings.__dict__, name=name, argdefs=argdefs, closure=closure
+        )
         self._stack.append(func)
 
     def STORE_NAME(self, arg):
@@ -101,22 +123,24 @@ class Python:
     def CALL_FUNCTION(self, arg):
         args = reversed([self._stack.pop() for _ in range(arg)])
         function = self._stack.pop()
-        log.info("Calling function %s", function.__name__)
+        if not hasattr(function, "__code__"):
+            # builtin/C
+            return self._stack.append(function(*args))
+        log.info("Calling function %s", getattr(function, "__name__", "(unknown)"))
         if isinstance(function, (type(print), type)):
             self._stack.append(function(*args))
         else:
             mapping = {}
-            for key, val in zip(function.__code__.co_cellvars, function.__defaults__):
-                mapping[key] = val
-            # mapping.update(function.__globals__)
-            import ipdb; ipdb.set_trace()
+            for name, param in inspect.signature(function).parameters.items():
+                if param.default is not inspect._empty:
+                    mapping[name] = param.default
             self._stack.append(
                 Python(
                     function.__code__,
                     function.__name__,
                     mappings=mapping,
                     # module=self._module,
-                    module=mod_cache[function.__module__]
+                    module=mod_cache[function.__module__],
                 )(*args)
             )
 
@@ -158,10 +182,11 @@ class Python:
         self._stack.append(getattr(obj, attr))
 
     def CALL_FUNCTION_KW(self, arg):
-        keys = self._stack.pop()
-        bindings = {key: self._stack.pop() for key in keys}
+        keys = list(reversed(self._stack.pop()))
+        kwargs = {key: self._stack.pop() for key in keys}
+        args = [self._stack.pop() for _ in range(arg - len(kwargs))]
         func = self._stack.pop()
-        self._stack.append(func(**bindings))
+        self._stack.append(func(*args, **kwargs))
 
     def LOAD_METHOD(self, arg):
         name = self.names[arg]
@@ -286,6 +311,16 @@ class Python:
 
     def STORE_DEREF(self, arg):
         setattr(self._mappings, self.cellvars[arg], self._stack.pop())
+
+    def LOAD_CLOSURE(self, arg):
+        if arg < len(self.cellvars):
+            name = self.cellvars[arg]
+        else:
+            name = self.freevars[arg - len(self.cellvars)]
+        self._stack.append(getattr(self._mappings, name))
+
+    def BUILD_TUPLE(self, arg):
+        self._stack.append(tuple(self._stack.pop() for _ in range(arg)))
 
 
 Function = type(pairwise)
