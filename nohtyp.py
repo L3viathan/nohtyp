@@ -48,7 +48,7 @@ class Namespace:
 
 
 class Python:
-    def __init__(self, code, my_name="unknown", mappings=None, module=None):
+    def __init__(self, code, my_name="unknown", mappings=None, module=None, is_main=False):
         for k in dir(code):
             if k.startswith("co_"):
                 _, __, name = k.partition("_")
@@ -67,6 +67,8 @@ class Python:
         else:
             self._mappings = Namespace(my_name, parent=builtins)
             mod_cache[my_name] = self
+            if is_main:
+                mod_cache["__main__"] = self
         self._module = module or self
         self._return = None
         self.ip = 0
@@ -134,6 +136,10 @@ class Python:
             for name, param in inspect.signature(function).parameters.items():
                 if param.default is not inspect._empty:
                     mapping[name] = param.default
+            for var, cell in zip(
+                function.__code__.co_freevars, reversed(function.__closure__ or [])
+            ):
+                mapping[var] = cell.cell_contents
             self._stack.append(
                 Python(
                     function.__code__,
@@ -301,15 +307,17 @@ class Python:
         self._stack.append("".join(self._stack.pop() for _ in range(arg)))
 
     def LOAD_DEREF(self, arg):
-        self._stack.append(getattr(self._mappings, self.cellvars[arg]))
+        cell_or_free = self.cellvars or self.freevars
+        self._stack.append(getattr(self._mappings, cell_or_free[arg]))
 
     def JUMP_IF_TRUE_OR_POP(self, arg):
         val = self._stack.pop()
         if val:
-            self.ip.seek(arg)
+            self.ip = arg
             self._stack.append(val)
 
     def STORE_DEREF(self, arg):
+        # Maybe we also have to look at freevars here?
         setattr(self._mappings, self.cellvars[arg], self._stack.pop())
 
     def LOAD_CLOSURE(self, arg):
@@ -321,6 +329,18 @@ class Python:
 
     def BUILD_TUPLE(self, arg):
         self._stack.append(tuple(self._stack.pop() for _ in range(arg)))
+
+    def BINARY_SUBTRACT(self, arg):
+        x = self._stack.pop()
+        self._stack.append(self._stack.pop() - x)
+
+    def BUILD_CONST_KEY_MAP(self, arg):
+        keys = reversed(self._stack.pop())
+        self._stack.append({key: self._stack.pop() for key in keys})
+
+    def BUILD_LIST(self, arg):
+        self._stack.append(list(self._stack.pop() for _ in range(arg)))
+
 
 
 Function = type(pairwise)
@@ -340,9 +360,9 @@ def run(filename, try_compile=True, is_main=False):
     with open(cached, "rb") as f:
         f.seek(16)  # ignore magic + timestamp
         code = marshal.load(f)
-        interpreter = Python(code, "__main__" if is_main else filename)
+        interpreter = Python(code, filename, is_main=is_main)
         return interpreter()
 
 
 if __name__ == "__main__":
-    run("curry", is_main=True)
+    run("splitter", is_main=True)
